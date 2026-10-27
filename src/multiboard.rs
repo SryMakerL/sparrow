@@ -1,12 +1,13 @@
 use crate::config::{DEFAULT_SPARROW_CONFIG, SparrowConfig};
 use crate::consts::DRAW_OPTIONS;
 use crate::optimizer::optimize;
-use crate::util::listener::{ReportType, SolutionListener};
+use crate::util::listener::{DummySolListener, ReportType, SolutionListener};
 use crate::util::multiboard_io::*;
 use crate::util::terminator::Terminator;
 use anyhow::{Result, ensure};
 use jagua_rs::Instant;
-use jagua_rs::io::export::export_layout_snapshot;
+use jagua_rs::geometry::geo_traits::Transformable;
+use jagua_rs::io::export::{export_layout_snapshot, int_to_ext_transformation};
 use jagua_rs::io::import::Importer;
 use jagua_rs::io::svg::s_layout_to_svg;
 use jagua_rs::probs::spp::entities::{SPProblem, SPSolution};
@@ -110,6 +111,25 @@ struct PlannedBoard {
     counts: Vec<u64>,
     board_idx: usize,
     area: f64,
+    occupied_length: f32,
+}
+
+fn occupied_length(solution: &SPSolution) -> f32 {
+    solution
+        .layout_snapshot()
+        .placed_items()
+        .values()
+        .fold(0.0, |right, pi| {
+            let original = pi.item().shape_orig();
+            let external = int_to_ext_transformation(&pi.d_transf(), &original.pre_transform);
+            right.max(
+                original
+                    .shape
+                    .transform_clone(&external.compose())
+                    .bbox()
+                    .x_max,
+            )
+        })
 }
 
 #[derive(Default)]
@@ -118,22 +138,19 @@ struct PlanScore {
     item_area: f64,
     used: Vec<u64>,
     board_area: f64,
-    weighted_item_area: f64,
-    weighted_board_area: f64,
-}
-
-fn utilization_weights(boards: &[Board]) -> Vec<usize> {
-    let mut priorities: Vec<_> = boards.iter().map(|board| board.priority).collect();
-    priorities.sort_unstable();
-    priorities.dedup();
-    boards
-        .iter()
-        .map(|board| priorities.binary_search(&board.priority).unwrap() + 1)
-        .collect()
+    occupied_area: f64,
 }
 
 impl PlanScore {
     fn overall_utilization(&self) -> f64 {
+        if self.occupied_area > 0.0 {
+            self.item_area / self.occupied_area
+        } else {
+            0.0
+        }
+    }
+
+    fn full_board_utilization(&self) -> f64 {
         if self.board_area > 0.0 {
             self.item_area / self.board_area
         } else {
@@ -141,12 +158,8 @@ impl PlanScore {
         }
     }
 
-    fn weighted_utilization(&self) -> f64 {
-        if self.weighted_board_area > 0.0 {
-            self.weighted_item_area / self.weighted_board_area
-        } else {
-            0.0
-        }
+    fn board_count(&self) -> usize {
+        self.used.iter().map(|&count| count as usize).sum()
     }
     fn better_than(&self, other: &Self, board_order: &[usize]) -> bool {
         let count = self.placed.iter().sum::<u64>();
@@ -161,16 +174,13 @@ impl PlanScore {
         if self.placed != other.placed {
             return false;
         }
-        let weighted = self.weighted_utilization();
-        let other_weighted = other.weighted_utilization();
-        if weighted != other_weighted {
-            return weighted > other_weighted;
+        let utilization = self.overall_utilization();
+        let other_utilization = other.overall_utilization();
+        if utilization != other_utilization {
+            return utilization > other_utilization;
         }
-        if self.board_area != other.board_area {
-            return self.board_area < other.board_area;
-        }
-        let boards = self.used.iter().sum::<u64>();
-        let other_boards = other.used.iter().sum::<u64>();
+        let boards = self.board_count();
+        let other_boards = other.board_count();
         if boards != other_boards {
             return boards < other_boards;
         }
@@ -252,14 +262,15 @@ fn build_live_svg(input: &MultiBoardInput, plan: &Plan, round: u64, status: &str
         ));
     content = content.add(label(
         format!(
-            "Overall utilization: {:.2}% | Weighted utilization: {:.2}%",
+            "Occupied utilization: {:.2}% | Full-board utilization: {:.2}% | Opened boards: {} | Opening penalty: {}",
             plan.score.overall_utilization() * 100.0,
-            plan.score.weighted_utilization() * 100.0
+            plan.score.full_board_utilization() * 100.0,
+            plan.score.board_count(),
+            plan.score.board_count()
         ),
         90.0,
         18,
     ));
-    let weights = utilization_weights(&input.boards);
     let mut y = 122.0;
     for (idx, planned) in plan.boards.iter().enumerate() {
         let board = &input.boards[planned.board_idx];
@@ -273,18 +284,15 @@ fn build_live_svg(input: &MultiBoardInput, plan: &Plan, round: u64, status: &str
             ))
             .add(label(
                 format!(
-                    "Size: {} x {} | Priority: {} | Utilization: {:.2}%",
+                    "Size: {} x {} | Priority: {} | Occupied length: {:.3} | Occupied utilization: {:.2}% | Full-board utilization: {:.2}%",
                     board.length,
                     board.width,
                     board.priority,
+                    planned.occupied_length,
+                    planned.area / (f64::from(planned.occupied_length) * f64::from(board.width)) * 100.0,
                     utilization * 100.0
                 ),
                 y + 26.0,
-                18,
-            ))
-            .add(label(
-                format!("Utilization weight: {}", weights[planned.board_idx]),
-                y + 50.0,
                 18,
             ));
         let height = 960.0 * f64::from(board.width) / f64::from(board.length);
@@ -382,7 +390,6 @@ pub fn solve(
     item_order.sort_by(|&a, &b| areas[b].total_cmp(&areas[a]));
     let mut board_order: Vec<_> = (0..input.boards.len()).collect();
     board_order.sort_by(|&a, &b| input.boards[b].priority.cmp(&input.boards[a].priority));
-    let weights = utilization_weights(&input.boards);
     let mut attempts = 0;
     let mut failures = 0;
     let mut search_rounds = 0;
@@ -393,13 +400,6 @@ pub fn solve(
 
     while needs_search && available(deadline, &options.interrupted) {
         search_rounds += 1;
-        let mut round_board_order = board_order.clone();
-        if search_rounds % 2 == 0 && round_board_order.len() > 1 {
-            round_board_order.shuffle(&mut rng);
-            if round_board_order == board_order {
-                round_board_order.rotate_left(1);
-            }
-        }
         if search_rounds > 1 && item_order.len() > 1 {
             let previous_first = item_order[0];
             item_order.shuffle(&mut rng);
@@ -418,12 +418,54 @@ pub fn solve(
             half_remaining.min(Duration::from_secs(2 * (1u64 << growth)))
         };
         let round_deadline = (Instant::now() + round_budget).min(deadline);
+        if search_rounds % 2 == 0 && !best_plan.boards.is_empty() {
+            let board_count = best_plan.boards.len();
+            for idx in 0..board_count {
+                let planned = &mut best_plan.boards[idx];
+                if !available(round_deadline, &options.interrupted) {
+                    break;
+                }
+                let slice = round_deadline
+                    .saturating_duration_since(Instant::now())
+                    .div_f64((board_count - idx) as f64)
+                    .min(Duration::from_secs(1));
+                let board = &input.boards[planned.board_idx];
+                if let Ok(Some(solution)) = refine(
+                    &subset(input, &planned.counts, board.width),
+                    board,
+                    &importer,
+                    config,
+                    &mut rng,
+                    (Instant::now() + slice).min(round_deadline),
+                    &options.interrupted,
+                    &planned.solution,
+                ) {
+                    let length = occupied_length(&solution);
+                    if length < planned.occupied_length {
+                        planned.solution = solution;
+                        planned.occupied_length = length;
+                        best_plan.score.occupied_area = best_plan
+                            .boards
+                            .iter()
+                            .map(|planned| {
+                                f64::from(planned.occupied_length)
+                                    * f64::from(input.boards[planned.board_idx].width)
+                            })
+                            .sum();
+                        best_round = search_rounds;
+                        #[cfg(feature = "live_svg")]
+                        write_live_svg(input, options, &best_plan, best_round, "refining")?;
+                    }
+                }
+            }
+            continue;
+        }
         let mut plan = Plan::empty(input);
         while plan.remaining.iter().any(|&qty| qty > 0)
             && available(round_deadline, &options.interrupted)
         {
             let mut committed = false;
-            for &bi in &round_board_order {
+            for &bi in &board_order {
                 let board = &input.boards[bi];
                 if plan.score.used[bi] == board.quantity {
                     continue;
@@ -491,6 +533,7 @@ pub fn solve(
                     plan.score.item_area += area;
                     plan.score.board_area += f64::from(board.length) * f64::from(board.width);
                     plan.boards.push(PlannedBoard {
+                        occupied_length: occupied_length(&solution),
                         solution,
                         counts,
                         board_idx: bi,
@@ -515,8 +558,7 @@ pub fn solve(
             .map(|(&count, &area)| count as f64 * area)
             .sum();
         plan.score.board_area = 0.0;
-        plan.score.weighted_item_area = 0.0;
-        plan.score.weighted_board_area = 0.0;
+        plan.score.occupied_area = 0.0;
         for planned in &mut plan.boards {
             planned.area = planned
                 .counts
@@ -526,10 +568,8 @@ pub fn solve(
                 .sum();
             let board = &input.boards[planned.board_idx];
             let board_area = f64::from(board.length) * f64::from(board.width);
-            let weight = weights[planned.board_idx] as f64;
             plan.score.board_area += board_area;
-            plan.score.weighted_item_area += weight * planned.area;
-            plan.score.weighted_board_area += weight * board_area;
+            plan.score.occupied_area += f64::from(planned.occupied_length) * f64::from(board.width);
         }
         if plan.score.better_than(&best_plan.score, &board_order) {
             best_plan = plan;
@@ -568,21 +608,31 @@ pub fn solve(
             planned.solution.layout_snapshot(),
             number,
             DRAW_OPTIONS,
-            &instance_id,
+            &format!(
+                "{instance_id} | Occupied length: {:.3} | Occupied utilization: {:.2}% | Full-board utilization: {:.2}%",
+                planned.occupied_length,
+                planned.area / (f64::from(planned.occupied_length) * f64::from(board.width))
+                    * 100.0,
+                planned.area / (f64::from(board.length) * f64::from(board.width)) * 100.0
+            ),
         );
         svg::save(output.join(&svg_name), &document)?;
-        let mut layout = export_layout_snapshot(planned.solution.layout_snapshot(), number);
-        let utilization = planned.area / (f64::from(board.length) * f64::from(board.width));
-        layout.density = utilization as f32;
+        let layout = export_layout_snapshot(planned.solution.layout_snapshot(), number);
+        let occupied_area = f64::from(planned.occupied_length) * f64::from(board.width);
+        let utilization = planned.area / occupied_area;
+        let full_board_utilization =
+            planned.area / (f64::from(board.length) * f64::from(board.width));
         boards.push(BoardResult {
             instance_id,
             board_id: board.id.clone(),
             priority: board.priority,
-            utilization_weight: weights[planned.board_idx],
             length: board.length,
             width: board.width,
             used_item_area: planned.area,
+            occupied_length: planned.occupied_length,
+            occupied_area,
             utilization,
+            full_board_utilization,
             items: quantities(input, &planned.counts),
             layout,
             svg: svg_name,
@@ -600,16 +650,16 @@ pub fn solve(
         candidate_attempts: attempts,
         failed_candidate_attempts: failures,
         overall_utilization: best_plan.score.overall_utilization(),
-        weighted_utilization: best_plan.score.weighted_utilization(),
+        full_board_utilization: best_plan.score.full_board_utilization(),
+        opened_boards: best_plan.score.board_count(),
+        opening_penalty: best_plan.score.board_count(),
         boards,
         inventory: input
             .boards
             .iter()
             .zip(best_plan.score.used)
-            .enumerate()
-            .map(|(idx, (b, n))| BoardUsage {
+            .map(|(b, n)| BoardUsage {
                 board_id: b.id.clone(),
-                utilization_weight: weights[idx],
                 available: b.quantity,
                 used: n,
                 remaining: b.quantity - n,
@@ -636,6 +686,68 @@ fn quantities(input: &MultiBoardInput, counts: &[u64]) -> Vec<ItemQuantity> {
             })
         })
         .collect()
+}
+
+fn refine(
+    ext: &ExtSPInstance,
+    board: &Board,
+    importer: &Importer,
+    mut config: SparrowConfig,
+    rng: &mut Xoshiro256PlusPlus,
+    deadline: Instant,
+    interrupted: &Arc<AtomicBool>,
+    initial: &SPSolution,
+) -> Result<Option<SPSolution>> {
+    let instance = import_instance(importer, ext)?;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+        || -> Result<Option<SPSolution>> {
+            let mut problem = SPProblem::new(instance.clone())?;
+            problem.restore(initial);
+            problem.fit_strip()?;
+            if !problem.layout().is_collision_free()
+                || problem.item_demand_qtys().iter().any(|&n| n != 0)
+            {
+                return Ok(None);
+            }
+            let initial = problem.save();
+            let slice = deadline.saturating_duration_since(Instant::now());
+            if slice.is_zero() || interrupted.load(Ordering::Relaxed) {
+                return Ok(None);
+            }
+            config.expl_cfg.time_limit = slice.mul_f64(0.8);
+            config.cmpr_cfg.time_limit = slice.mul_f64(0.2);
+            let mut terminator = BudgetTerminator {
+                deadline,
+                phase_deadline: deadline,
+                interrupted: interrupted.clone(),
+                found: Arc::new(AtomicBool::new(false)),
+            };
+            let solution = optimize(
+                instance,
+                Xoshiro256PlusPlus::seed_from_u64(rng.next_u64()),
+                &mut DummySolListener,
+                &mut terminator,
+                &config.expl_cfg,
+                &config.cmpr_cfg,
+                Some(&initial),
+            )?;
+            if !solution.strip_width().is_finite() || solution.strip_width() > board.length {
+                return Ok(None);
+            }
+            problem.restore(&solution);
+            problem.change_strip_width(board.length)?;
+            if problem.item_demand_qtys().iter().any(|&n| n != 0)
+                || !problem.layout().is_collision_free()
+            {
+                return Ok(None);
+            }
+            Ok(Some(problem.save()))
+        },
+    ));
+    match result {
+        Ok(solution) => solution,
+        Err(_) => Ok(None),
+    }
 }
 
 fn candidate(
@@ -706,7 +818,9 @@ mod tests {
         let document = build_live_svg(&input, &Plan::empty(&input), 0, "starting").to_string();
         assert!(document.contains("Job &lt;&amp;&gt; \"quoted\""));
         assert!(document.contains("Placed 0/0 | Best round 0 | Status: starting"));
-        assert!(document.contains("Overall utilization: 0.00% | Weighted utilization: 0.00%"));
+        assert!(
+            document.contains("Occupied utilization: 0.00% | Full-board utilization: 0.00% | Opened boards: 0 | Opening penalty: 0")
+        );
         assert!(!document.contains("NaN"));
         assert!(document.contains("Waiting for a feasible board layout"));
         let path =
@@ -741,8 +855,7 @@ mod tests {
             item_area,
             used: used.to_vec(),
             board_area,
-            weighted_item_area: item_area,
-            weighted_board_area: board_area,
+            occupied_area: board_area,
         }
     }
 
@@ -756,57 +869,154 @@ mod tests {
     }
 
     #[test]
-    fn score_uses_weighted_utilization_before_priority_and_ties() {
-        let high_only = score(&[3], 27.0, &[3, 0, 0], 60.0);
-        let fewer_low = score(&[3], 27.0, &[0, 0, 1], 30.0);
-        assert!(fewer_low.better_than(&high_only, &[0, 1, 2]));
-        assert!(!high_only.better_than(&fewer_low, &[0, 1, 2]));
-        let mut weighted = score(&[3], 27.0, &[2, 0, 0], 60.0);
-        weighted.weighted_item_area = 50.0;
-        weighted.weighted_board_area = 55.0;
-        assert!(weighted.better_than(&fewer_low, &[0, 1, 2]));
+    fn score_uses_utilization_then_opening_penalty_then_priority() {
+        let fewer = score(&[3], 27.0, &[1, 0, 0], 60.0);
+        let higher_utilization = score(&[3], 27.0, &[0, 0, 3], 50.0);
+        assert!(higher_utilization.better_than(&fewer, &[0, 1, 2]));
+        assert!(!fewer.better_than(&higher_utilization, &[0, 1, 2]));
+        let more = score(&[3], 27.0, &[3, 0, 0], 60.0);
+        assert!(fewer.better_than(&more, &[0, 1, 2]));
+        assert!(!more.better_than(&fewer, &[0, 1, 2]));
         let partial = score(&[2], 26.0, &[0, 0, 1], 26.0);
-        assert!(!partial.better_than(&high_only, &[0, 1, 2]));
-        let equal = score(&[3], 27.0, &[0, 3, 0], 60.0);
-        assert!(high_only.better_than(&equal, &[0, 1, 2]));
-        let fewer = score(&[3], 27.0, &[0, 0, 1], 60.0);
-        assert!(fewer.better_than(&high_only, &[0, 1, 2]));
-        let mut compact = score(&[3], 27.0, &[0, 0, 3], 50.0);
-        compact.weighted_item_area = 27.0;
-        compact.weighted_board_area = 60.0;
-        assert!(compact.better_than(&high_only, &[0, 1, 2]));
+        assert!(!partial.better_than(&more, &[0, 1, 2]));
+        let lower_priority = score(&[3], 27.0, &[0, 3, 0], 60.0);
+        assert!(more.better_than(&lower_priority, &[0, 1, 2]));
+        assert!(!lower_priority.better_than(&more, &[0, 1, 2]));
+        assert_eq!(fewer.board_count(), 1);
+        assert_eq!(more.board_count(), 3);
     }
 
     #[test]
-    fn weights_rank_all_priorities_without_signed_arithmetic() {
+    fn original_right_boundary_counts_left_gap_rotation_and_reflection() {
         use super::*;
-        let boards: Vec<_> = [i64::MAX, 0, i64::MIN, -1, i64::MAX]
-            .into_iter()
-            .map(|priority| Board {
-                id: priority.to_string(),
-                length: 1.0,
-                width: 1.0,
-                quantity: 0,
-                priority,
-            })
-            .collect();
-        assert_eq!(utilization_weights(&boards), [4, 3, 1, 2, 4]);
-        assert!(utilization_weights(&[]).is_empty());
+        use jagua_rs::geometry::DTransformation;
+        use jagua_rs::probs::spp::entities::SPPlacement;
+        let input: MultiBoardInput = serde_json::from_value(serde_json::json!({
+            "name": "boundary", "min_item_separation": 0.2, "boards": [],
+            "items": [{"id": 7, "demand": 1,
+                "orientation": {"rotation": {"mode": "continuous"}},
+                "shape": {"type": "rectangle", "data": {"x_min": 10, "y_min": -7, "width": 3, "height": 2}}}]
+        })).unwrap();
+        let cfg = DEFAULT_SPARROW_CONFIG;
+        let importer = Importer::new(
+            cfg.cde_config,
+            cfg.poly_simpl_tolerance,
+            cfg.narrow_concavity_cutoff_ratio,
+        );
+        let instance = import_instance(&importer, &subset(&input, &[1], 20.0)).unwrap();
+        let mut problem = SPProblem::new(instance).unwrap();
+        problem.change_strip_width(30.0).unwrap();
+        assert_eq!(occupied_length(&problem.save()), 0.0);
+        for reflected in [false, true] {
+            for angle in [0.0, std::f32::consts::FRAC_PI_2] {
+                let key = problem.place_item(SPPlacement {
+                    item_idx: 0,
+                    d_transf: DTransformation::new(angle, (8.0, 8.0)).with_reflection(reflected),
+                });
+                let solution = problem.save();
+                let pi = solution
+                    .layout_snapshot()
+                    .placed_items()
+                    .values()
+                    .next()
+                    .unwrap();
+                let ext = int_to_ext_transformation(
+                    &pi.d_transf(),
+                    &pi.item().shape_orig().pre_transform,
+                );
+                let expected = if angle == 0.0 {
+                    13.0 + ext.translation().0
+                } else if reflected {
+                    -5.0 + ext.translation().0
+                } else {
+                    7.0 + ext.translation().0
+                };
+                assert!((occupied_length(&solution) - expected).abs() < 1e-4);
+                assert!(occupied_length(&solution) > if angle == 0.0 { 3.0 } else { 2.0 });
+                problem.remove_item(key);
+            }
+        }
     }
 
     #[test]
-    fn utilization_is_ratio_of_weighted_areas_not_mean_of_ratios() {
-        let mut baseline = score(&[1], 60.0, &[1, 1], 120.0);
-        baseline.weighted_item_area = 2.0 * 10.0 + 50.0;
-        baseline.weighted_board_area = 2.0 * 20.0 + 100.0;
-        assert_eq!(baseline.weighted_utilization(), 0.5);
-        let mut improved = score(&[1], 60.0, &[1, 1], 120.0);
-        improved.weighted_item_area = 2.0 * 20.0 + 40.0;
-        improved.weighted_board_area = 140.0;
-        assert!((improved.weighted_utilization() - 80.0 / 140.0).abs() < 1e-12);
-        assert_ne!(improved.weighted_utilization(), (1.0 + 0.4) / 2.0);
-        assert!(improved.better_than(&baseline, &[0, 1]));
+    fn warm_start_preserves_fixed_stock_and_demand_without_regression() {
+        use super::*;
+        use jagua_rs::geometry::DTransformation;
+        use jagua_rs::probs::spp::entities::SPPlacement;
+        let input: MultiBoardInput = serde_json::from_value(serde_json::json!({
+            "name": "refine", "boards": [{"id":"stock", "length":40, "width":10, "quantity":1, "priority":0}],
+            "items": [{"id":7,"demand":1,"orientation":{"rotation":{"mode":"discrete","angles":[0]}},
+                "shape":{"type":"rectangle","data":{"x_min":10,"y_min":-7,"width":3,"height":2}}}]
+        })).unwrap();
+        let cfg = DEFAULT_SPARROW_CONFIG;
+        let importer = Importer::new(
+            cfg.cde_config,
+            cfg.poly_simpl_tolerance,
+            cfg.narrow_concavity_cutoff_ratio,
+        );
+        let ext = subset(&input, &[1], 10.0);
+        let instance = import_instance(&importer, &ext).unwrap();
+        let mut problem = SPProblem::new(instance).unwrap();
+        problem.change_strip_width(40.0).unwrap();
+        problem.place_item(SPPlacement {
+            item_idx: 0,
+            d_transf: DTransformation::new(0.0, (20.0, 5.0)),
+        });
+        assert!(problem.layout().is_collision_free());
+        let mut best = problem.save();
+        let before = occupied_length(&best);
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(42);
+        let result = refine(
+            &ext,
+            &input.boards[0],
+            &importer,
+            cfg,
+            &mut rng,
+            Instant::now() + Duration::from_millis(150),
+            &Arc::new(AtomicBool::new(false)),
+            &best,
+        )
+        .unwrap()
+        .unwrap();
+        if occupied_length(&result) < before {
+            best = result;
+        }
+        assert!(occupied_length(&best) <= before);
+        assert_eq!(best.strip_width(), 40.0);
+        problem.restore(&best);
+        assert!(problem.layout().is_collision_free());
+        assert!(problem.item_demand_qtys().iter().all(|&n| n == 0));
+        assert_eq!(best.layout_snapshot().placed_items().len(), 1);
+        assert_eq!(input.boards[0].quantity, 1);
+        let svg = s_layout_to_svg(best.layout_snapshot(), 1, DRAW_OPTIONS, "fixed").to_string();
+        assert!(svg.contains("container_"));
+    }
+
+    #[test]
+    fn same_fixed_stock_improves_by_placement_and_uses_area_weighting() {
+        let mut best = score(&[2], 60.0, &[1, 1], 1000.0);
+        best.occupied_area = 120.0;
+        let mut compact = score(&[2], 60.0, &[1, 1], 1000.0);
+        compact.occupied_area = 100.0;
+        assert!(compact.better_than(&best, &[0, 1]));
+        assert!(!best.better_than(&compact, &[0, 1]));
+        assert_eq!(compact.overall_utilization(), 0.6);
+        assert_eq!(compact.full_board_utilization(), 0.06);
+        assert_ne!(
+            best.overall_utilization(),
+            (10.0 / 10.0 + 50.0 / 110.0) / 2.0
+        );
+    }
+
+    #[test]
+    fn utilization_is_ratio_of_total_areas() {
+        let baseline = score(&[2], 60.0, &[1, 1], 120.0);
+        assert_eq!(baseline.overall_utilization(), 0.5);
+        assert_ne!(
+            baseline.overall_utilization(),
+            (10.0 / 10.0 + 50.0 / 110.0) / 2.0
+        );
         assert_eq!(PlanScore::default().overall_utilization(), 0.0);
-        assert_eq!(PlanScore::default().weighted_utilization(), 0.0);
+        assert_eq!(PlanScore::default().board_count(), 0);
     }
 }

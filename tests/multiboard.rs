@@ -93,58 +93,73 @@ fn priorities_inventory_conservation_and_external_transforms() {
     );
     assert_eq!(
         summary
-            .inventory
+            .boards
             .iter()
-            .map(|b| b.utilization_weight)
+            .map(|board| board.board_id.as_str())
             .collect::<Vec<_>>(),
-        [1, 2, 2]
+        ["high", "high", "equal", "low"]
     );
     assert!(summary.unplaced.is_empty());
     for (idx, board) in summary.boards.iter().enumerate() {
         assert_eq!(board.instance_id, format!("board_{:06}", idx + 1));
         assert_eq!(board.layout.container_id, idx as u64 + 1);
         assert_eq!(board.layout.placed_items.len(), 1);
-        assert!((board.utilization - 9.0 / 16.0).abs() < 1e-6);
+        assert!((board.full_board_utilization - 9.0 / 16.0).abs() < 1e-6);
+        assert!((board.utilization - 9.0 / board.occupied_area).abs() < 1e-12);
+        assert_eq!(
+            board.occupied_area,
+            f64::from(board.occupied_length) * f64::from(board.width)
+        );
         let item = &board.layout.placed_items[0];
         assert_eq!(item.item_id, 901);
         let (tx, ty) = item.transformation.translation;
         assert!(item.transformation.rotation.abs() < 1e-4);
         assert!(10.0 + tx >= 0.0 && 13.0 + tx <= board.length);
         assert!(-7.0 + ty >= 0.0 && -4.0 + ty <= board.width);
+        assert!((board.occupied_length - (13.0 + tx)).abs() < 1e-5);
+        assert!((board.layout.density as f64 - board.full_board_utilization).abs() < 1e-5);
         let svg = std::fs::read_to_string(dir.join(&board.svg)).unwrap();
+        assert!(svg.contains("Occupied length:"));
         assert!(svg.contains("container_"));
     }
     assert_eq!(summary.inventory.iter().map(|b| b.used).sum::<u64>(), 4);
     let mut item_area = 0.0;
     let mut board_area = 0.0;
-    let mut weighted_item_area = 0.0;
-    let mut weighted_board_area = 0.0;
     for board in &summary.boards {
         let source = input
             .boards
             .iter()
             .find(|b| b.id == board.board_id)
             .unwrap();
-        let weight = if source.priority == 10 { 2 } else { 1 };
-        assert_eq!(board.utilization_weight, weight);
         let area = board.layout.placed_items.len() as f64 * 9.0;
         let stock_area = f64::from(source.length) * f64::from(source.width);
         assert!((board.used_item_area - area).abs() < 1e-9);
         item_area += area;
         board_area += stock_area;
-        weighted_item_area += weight as f64 * area;
-        weighted_board_area += weight as f64 * stock_area;
     }
-    assert!((summary.overall_utilization - item_area / board_area).abs() < 1e-12);
-    assert!(
-        (summary.weighted_utilization - weighted_item_area / weighted_board_area).abs() < 1e-12
-    );
+    let occupied_area: f64 = summary.boards.iter().map(|b| b.occupied_area).sum();
+    assert!((summary.overall_utilization - item_area / occupied_area).abs() < 1e-12);
+    assert!((summary.full_board_utilization - item_area / board_area).abs() < 1e-12);
+    let opened = summary
+        .inventory
+        .iter()
+        .map(|board| board.used as usize)
+        .sum::<usize>();
+    assert_eq!(summary.opened_boards, opened);
+    assert_eq!(summary.opened_boards, summary.boards.len());
+    assert_eq!(summary.opening_penalty, opened);
     let json: serde_json::Value =
         serde_json::from_reader(std::fs::File::open(dir.join("summary.json")).unwrap()).unwrap();
     assert_eq!(
-        json["weighted_utilization"].as_f64().unwrap(),
-        summary.weighted_utilization
+        json["overall_utilization"].as_f64().unwrap(),
+        item_area / occupied_area
     );
+    assert_eq!(
+        json["full_board_utilization"].as_f64().unwrap(),
+        item_area / board_area
+    );
+    assert_eq!(json["opened_boards"].as_u64().unwrap(), opened as u64);
+    assert_eq!(json["opening_penalty"].as_u64().unwrap(), opened as u64);
     assert!(dir.join("summary.json").is_file());
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -179,7 +194,8 @@ fn zero_budget_preserves_demand() {
     assert_eq!(summary.unplaced[0].quantity, 4);
     assert_eq!(summary.candidate_attempts, 0);
     assert_eq!(summary.overall_utilization, 0.0);
-    assert_eq!(summary.weighted_utilization, 0.0);
+    assert_eq!(summary.opened_boards, 0);
+    assert_eq!(summary.opening_penalty, 0);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -259,25 +275,33 @@ fn completed_jobs_keep_searching_and_preserve_quantities() {
 }
 
 #[test]
-fn weighted_search_can_replace_an_inefficient_high_priority_board() {
+fn every_round_opens_high_priority_then_input_order() {
     let mut input = input();
-    input.items[0].demand = 1;
-    input.boards.truncate(2);
-    input.boards[0].length = 4.0;
-    input.boards[0].width = 4.0;
-    input.boards[1].length = 100.0;
-    input.boards[1].width = 100.0;
+    for board in &mut input.boards {
+        board.length = 4.0;
+        board.priority = if board.id == "low" {
+            i64::MIN
+        } else {
+            i64::MAX
+        };
+    }
+    let mut options = options();
+    options.time_limit = Duration::from_secs(5);
     let dir = directory();
-    let summary = solve(&input, &options(), &dir).unwrap();
+    let summary = solve(&input, &options, &dir).unwrap();
     assert!(summary.all_items_placed);
     assert!(summary.search_rounds >= 2);
-    assert_eq!(summary.boards.len(), 1);
-    assert_eq!(summary.boards[0].board_id, "low");
-    assert_eq!(summary.boards[0].utilization_weight, 1);
-    assert_eq!(summary.inventory[1].utilization_weight, 2);
-    assert_eq!(summary.inventory[1].used, 0);
-    assert!((summary.overall_utilization - 9.0 / 16.0).abs() < 1e-12);
-    assert!((summary.weighted_utilization - 9.0 / 16.0).abs() < 1e-12);
+    assert_eq!(
+        summary
+            .boards
+            .iter()
+            .map(|board| board.board_id.as_str())
+            .collect::<Vec<_>>(),
+        ["high", "high", "equal", "low"]
+    );
+    assert_eq!(summary.opened_boards, 4);
+    assert_eq!(summary.opening_penalty, 4);
+    assert!((summary.full_board_utilization - 9.0 / 16.0).abs() < 1e-12);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -304,6 +328,9 @@ fn live_svg_contains_all_best_boards_and_unique_references() {
     use std::collections::HashSet;
     use svg::parser::Event;
     let mut input = input();
+    for board in &mut input.boards {
+        board.length = 4.0;
+    }
     input.name = "Job <&>".to_owned();
     input.boards[1].id = "high <&> \"board\"".to_owned();
     input.items[0].demand = 2;
@@ -332,12 +359,13 @@ fn live_svg_contains_all_best_boards_and_unique_references() {
             "{} | Board type: {}",
             board.instance_id, escaped_id
         )));
-        assert!(text.contains(&format!("Utilization weight: {}", board.utilization_weight)));
     }
     assert!(text.contains(&format!(
-        "Overall utilization: {:.2}% | Weighted utilization: {:.2}%",
+        "Occupied utilization: {:.2}% | Full-board utilization: {:.2}% | Opened boards: {} | Opening penalty: {}",
         summary.overall_utilization * 100.0,
-        summary.weighted_utilization * 100.0
+        summary.full_board_utilization * 100.0,
+        summary.opened_boards,
+        summary.opening_penalty
     )));
     let mut ids = HashSet::new();
     let mut references = Vec::new();

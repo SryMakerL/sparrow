@@ -2,4 +2,4 @@
 
 ## 多板排料需求与工具链
 
-用户要求保持 sparrow 算法内核不变，新增多规格固定尺寸有限库存板材排料，并在总时限内持续重排，截止或中断后输出搜索最佳方案。最新目标替代之前的严格优先级评分：保证尽量排全后，以总体优先级加权利用率为目标，U=Σ(w×板上原始零件面积)/Σ(w×已用整板面积)；优先级数字越大权重越大，同级同权重，按输入所有不同优先级升序映射1..K。板型优先级不再是凌驾利用率的硬比较，允许探索不同板型用量。live_svg复用data/live/.live_solution.svg及原viewer，多板纵向拼图，viewer长图最大640px宽。Rust/Cargo可用 C:/Users/Huawei/.cargo/bin 的绝对路径，当前shell PATH可能含换行。
+用户最新明确纠正利用率口径并通过选项确认：单板U=原始零件总面积/(占用长度*板材固定宽度)，占用长度从x=0到所有原始零件最右侧边界(不减minx)；多板overall=sum原始零件面积/sum各板占用长度*固定板宽。之前整板面积率只作辅助full_board_utilization，不是优化主目标。取消加权，开新板priority降序同级输入顺序，库存/固定边界硬限制，同利用率时每开一张惩罚1优先板少。保留内核，外层持续搜索到deadline并对已有best逐板热启动压缩(不能FitListener fit即停)。live_svg单SVG多板拼图，viewer长图最大640px居中。RustCargo绝对路径C:/Users/Huawei/.cargo/bin，PATH可能含换行。
