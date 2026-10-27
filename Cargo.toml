@@ -11,6 +11,10 @@ name = "sparrow"
 path = "src/main.rs"
 
 [[bin]]
+name = "sparrow-multiboard"
+path = "src/multiboard_main.rs"
+
+[[bin]]
 name = "bench"
 path = "src/bench.rs"
 

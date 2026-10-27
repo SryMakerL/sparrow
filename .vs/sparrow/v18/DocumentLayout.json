@@ -1,0 +1,71 @@
+{
+  "Version": 1,
+  "WorkspaceRootPath": "D:\\work files\\codes\\sparrow\\",
+  "Documents": [
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|D:\\work files\\codes\\sparrow\\data\\input\\albano1.json||{90A6B3A7-C1A3-4009-A288-E2FF89E96FA0}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:data\\input\\albano1.json||{90A6B3A7-C1A3-4009-A288-E2FF89E96FA0}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|D:\\work files\\codes\\sparrow\\data\\input\\jakobs3.json||{90A6B3A7-C1A3-4009-A288-E2FF89E96FA0}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:data\\input\\jakobs3.json||{90A6B3A7-C1A3-4009-A288-E2FF89E96FA0}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|D:\\work files\\codes\\sparrow\\data\\input\\jakobs2.json||{90A6B3A7-C1A3-4009-A288-E2FF89E96FA0}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:data\\input\\jakobs2.json||{90A6B3A7-C1A3-4009-A288-E2FF89E96FA0}"
+    }
+  ],
+  "DocumentGroupContainers": [
+    {
+      "Orientation": 0,
+      "VerticalTabListWidth": 256,
+      "DocumentGroups": [
+        {
+          "DockedWidth": 254,
+          "SelectedChildIndex": 0,
+          "Children": [
+            {
+              "$type": "Document",
+              "DocumentIndex": 0,
+              "Title": "albano1.json",
+              "DocumentMoniker": "D:\\work files\\codes\\sparrow\\data\\input\\albano1.json",
+              "RelativeDocumentMoniker": "data\\input\\albano1.json",
+              "ToolTip": "D:\\work files\\codes\\sparrow\\data\\input\\albano1.json",
+              "RelativeToolTip": "data\\input\\albano1.json",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAEAAAASAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001642|",
+              "WhenOpened": "2026-10-27T03:54:45.053Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 1,
+              "Title": "jakobs3.json",
+              "DocumentMoniker": "D:\\work files\\codes\\sparrow\\data\\input\\jakobs3.json",
+              "RelativeDocumentMoniker": "data\\input\\jakobs3.json",
+              "ToolTip": "D:\\work files\\codes\\sparrow\\data\\input\\jakobs3.json",
+              "RelativeToolTip": "data\\input\\jakobs3.json",
+              "ViewState": "AgIAAHoDAAAAAAAAAAAAAIoDAAAMAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001642|",
+              "WhenOpened": "2026-10-27T03:24:51.792Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 2,
+              "Title": "jakobs2.json",
+              "DocumentMoniker": "D:\\work files\\codes\\sparrow\\data\\input\\jakobs2.json",
+              "RelativeDocumentMoniker": "data\\input\\jakobs2.json",
+              "ToolTip": "D:\\work files\\codes\\sparrow\\data\\input\\jakobs2.json",
+              "RelativeToolTip": "data\\input\\jakobs2.json",
+              "ViewState": "AgIAAHMDAAAAAAAAAAAAAI0DAAAPAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001642|",
+              "WhenOpened": "2026-10-27T03:23:38.288Z",
+              "EditorCaption": ""
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

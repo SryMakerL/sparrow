@@ -1,6 +1,7 @@
 pub mod assertions;
 
 pub mod io;
+pub mod multiboard_io;
 pub mod listener;
 pub mod svg_exporter;
 pub mod terminator;

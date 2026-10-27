@@ -31,6 +31,22 @@
             display: none;
         }
 
+        body.long-layout {
+            display: block;
+            overflow: auto;
+        }
+
+        body.long-layout .container {
+            width: min(100%, 640px);
+            height: auto;
+            margin: 0 auto;
+        }
+
+        body.long-layout #solutionSVG {
+            position: relative;
+            height: auto;
+        }
+
         .placeholder {
             width: 100%;
             height: 100%;
@@ -53,6 +69,8 @@
 
             tempImg.onload = function() {
                 const img = document.getElementById("solutionSVG");
+                document.body.classList.toggle("long-layout",
+                    tempImg.naturalHeight / tempImg.naturalWidth > window.innerHeight / window.innerWidth);
                 img.src = url;
                 img.style.display = "block";
                 document.querySelector(".placeholder").style.display = "none";
